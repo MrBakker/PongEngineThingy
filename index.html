@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset='utf-8'>
+    <meta http-equiv='X-UA-Compatible' content='IE=edge'>
+    <title>Pong test</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <script src='index.js'></script>
+</head>
+
+<body>
+    <button id="startButton">Start</button>
+    <button id="stopButton">Stop</button>
+    <canvas id="gameCanvas" width="1000" height="1000" style="width: 1000px; height: 1000px;"></canvas>
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const pongGame = new PongGame([1, 2, 3, 4, 5, 6, 7], {
+            canvasWidth: 1000,
+            canvasHeight: 1000,
+            ballSpeed: 300,
+            paddleSpeed: 400,
+            paddleSize: 0.3,
+            powerupFrequency: 5,
+            amountOfBalls: 2,
+        });
+        let animationFrameId = null;
+        let speed = 1;
+
+        function resizeCanvas() {
+            const size = Math.min(window.innerWidth, window.innerHeight);
+            canvas.style.width = size + "px";
+            canvas.style.height = size + "px";
+        }
+
+        window.addEventListener("resize", resizeCanvas);
+
+        function playGame() {
+            pongGame.playSimulation(0.016 * speed * speed * 0.6);
+            drawScene(canvas, pongGame.getScene(), undefined);
+            animationFrameId = requestAnimationFrame(playGame);
+        }
+
+        function stopPlayingGame() {
+            cancelAnimationFrame(animationFrameId);
+        }
+
+        document.getElementById("startButton").addEventListener("click", () => {
+            playGame();
+        });
+
+        document.getElementById("stopButton").addEventListener("click", () => {
+            stopPlayingGame();
+        });
+
+        function drawScene(canvas, scene, hit) {
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            for (const obj of scene.getRawObjects()) {
+                if (obj instanceof LineObject) {
+                    ctx.lineWidth = obj.thickness || 1;
+                    ctx.beginPath();
+                    ctx.moveTo(obj.pointA.x, obj.pointA.y);
+                    ctx.lineTo(obj.pointB.x, obj.pointB.y);
+                    ctx.stroke();
+                } else if (obj instanceof CircleObject) {
+                    ctx.beginPath();
+                    ctx.arc(obj.center.x, obj.center.y, obj.radius, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+
+            if (hit && hit[0] && hit[1]) {
+                // Sraw hit point
+                ctx.fillStyle = "red";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(hit[1].point.x, hit[1].point.y, 5, 0, 2 * Math.PI);
+                ctx.fill();
+
+                // Draw normal
+                ctx.strokeStyle = "blue";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(hit[1].point.x, hit[1].point.y);
+                ctx.lineTo(hit[1].point.x + hit[1].normal.x * 20, hit[1].point.y + hit[1].normal.y * 20);
+                ctx.stroke();
+
+                // Draw path of ball as dotted line
+                const ball = hit[0];
+                ctx.strokeStyle = "green";
+                ctx.lineWidth = 2;
+                // set dotted line pattern (dash, gap)
+                ctx.setLineDash([10, 6]);
+                ctx.beginPath();
+                const futurePos = ball.sceneObject.center.add(ball.sceneObject.velocity.mul(hit[1].time));
+                ctx.moveTo(futurePos.x, futurePos.y);
+                ctx.lineTo(ball.sceneObject.center.x, ball.sceneObject.center.y);
+                ctx.stroke();
+                // reset dash
+                ctx.setLineDash([]);
+
+                // Reset styles
+                ctx.fillStyle = "black";
+                ctx.strokeStyle = "black";
+                ctx.lineWidth = 1;
+            }
+        }
+
+        // Add objects to the scene as needed
+        // pongGame.getScene().addObject(new LineObject(new Vec2(100, 100), new Vec2(900, 100), new Vec2(5, 0), 50));
+        // pongGame.getScene().addObject(new LineObject(new Vec2(500, 75), new Vec2(500, 125), new Vec2(5, 0), 800));
+        // pongGame.getScene().addObject(new CircleObject(new Vec2(500, 500), 80, new Vec2(0, 0)));
+
+        // const requiredKeys = pongGame.getHandledKeys();
+        window.addEventListener("keydown", (event) => {
+            pongGame.handleKeyPress(event.key, true);
+
+            let num = parseInt(event.key);
+            if (!isNaN(num)) {
+                speed = num;
+            }
+        });
+
+        window.addEventListener("keyup", (event) => {
+            pongGame.handleKeyPress(event.key, false);
+        });
+
+        drawScene(canvas, pongGame.getScene());
+    </script>
+</body>
+
+</html>
