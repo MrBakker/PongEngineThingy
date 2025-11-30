@@ -93,7 +93,7 @@ class BaseObject {
 
     private parentObject: BaseObject | null = null;
 
-    private collisionHandler: (other: BaseObject) => CollisionResponse = (other: BaseObject) => CollisionResponse.BOUNCE;
+    private collisionHandler: (other: BaseObject, elapsedTime: number) => CollisionResponse = (other: BaseObject, elapsedTime: number) => CollisionResponse.BOUNCE;
 
     constructor(velocity: Vec2, inverseMass: number = 1.0, restitution: number = 1.0, parentObject: BaseObject | null = null) {
         this._velocity = velocity;
@@ -134,12 +134,12 @@ class BaseObject {
         return false;
     }
 
-    setCollisionHandler(handler: (other: BaseObject) => CollisionResponse): void {
+    setCollisionHandler(handler: (other: BaseObject, elapsedTime: number) => CollisionResponse): void {
         this.collisionHandler = handler;
     }
 
-    onCollision(other: BaseObject): CollisionResponse {
-        return this.collisionHandler(other);
+    onCollision(other: BaseObject, elapsedTime: number): CollisionResponse {
+        return this.collisionHandler(other, elapsedTime);
     }
 
     moveByDelta(delta: number): void {
@@ -365,9 +365,14 @@ type sceneObject = BaseObject;
 class Scene {
     private objects: sceneObject[];
     private elapsedTime: number = 0;
+    private timeScale: number = 1.0;
 
     constructor() {
         this.objects = [];
+    }
+
+    public setTimeScale(scale: number): void {
+        this.timeScale = scale;
     }
 
     public addObject(obj: sceneObject): void {
@@ -392,7 +397,7 @@ class Scene {
         for (const obj of this.objects) {
             obj.moveByDelta(deltaTime);
         }
-        this.elapsedTime += deltaTime;
+        this.elapsedTime += (deltaTime / this.timeScale);
     }
 
     private getNextCollisionBetweenObjects(mainObjects: BaseObject[]): Collision | null {
@@ -444,8 +449,7 @@ class Scene {
     }
 
     public playSimulation(deltaTime: number, mainObjects?: BaseObject[]) {
-        console.log("Starting simulation step with deltaTime =", deltaTime);
-        let timeRemaining = deltaTime;
+        let timeRemaining = deltaTime * this.timeScale;
         let shouldContinue = true;
         let timeout = 1000;
 
@@ -463,8 +467,8 @@ class Scene {
 
             const parentA = this.fetchParentObject(collision.objectA) || collision.objectA;
             const parentB = this.fetchParentObject(collision.objectB) || collision.objectB;
-            const aTask = parentA.onCollision(parentB);
-            const bTask = parentB.onCollision(parentA);
+            const aTask = parentA.onCollision(parentB, this.elapsedTime);
+            const bTask = parentB.onCollision(parentA, this.elapsedTime);
 
             const handleMethod = Math.max(aTask, bTask);
             switch (handleMethod) {
@@ -494,6 +498,10 @@ class Scene {
             }
         }
     }
+
+    public getElapsedTime(): number {
+        return this.elapsedTime;
+    }
 }
 
 type PongPaddleKeyData = {
@@ -502,13 +510,42 @@ type PongPaddleKeyData = {
     isClockwise: boolean;
 }
 
+enum PowerupType {
+    ADD_BALL,
+    INCREASE_PADDLE_SPEED,
+    DECREASE_PADDLE_SPEED,
+    SLOW_MOTION,
+    REVERSE_CONTROLS,
+}
+
+type PowerupData = {
+    type: PowerupType;
+    chance: number;
+    duration: number | null;
+}
+
+const powerupData: PowerupData[] = [
+    { type: PowerupType.ADD_BALL, chance: 30, duration: null },
+    { type: PowerupType.INCREASE_PADDLE_SPEED, chance: 20, duration: 10 },
+    { type: PowerupType.DECREASE_PADDLE_SPEED, chance: 20, duration: 10 },
+    { type: PowerupType.SLOW_MOTION, chance: 20, duration: 10 },
+    { type: PowerupType.REVERSE_CONTROLS, chance: 10, duration: 10 },
+];
+const totalPowerupChance = powerupData.reduce((sum, p) => sum + p.chance, 0);
+
 class PongPaddle extends MultiObject {
     public keyData: PongPaddleKeyData[];
-    public playerId: number = -1;
+    public playerId: number;
     public clockwiseBaseVelocity: Vec2;
     public bounds: { min: Vec2; max: Vec2 };
+    public paddleWidth: number;
+    public paddleHeight: number;
+    public paddleAngle: number;
 
-    constructor(center: Vec2, width: number, height: number, paddleDirection: Vec2, protectedWallWidth: number, walls: LineObject[] = []) {
+    private boardPaddleSpeed: number;
+    private reverseControls: boolean = false;
+
+    constructor(center: Vec2, width: number, height: number, paddleDirection: Vec2, protectedWallWidth: number, paddleSpeedFactor: number, walls: LineObject[] = [], playerId: number) {
         const halfWidth = width / 2;
         const halfHeight = height / 2;
 
@@ -599,6 +636,11 @@ class PongPaddle extends MultiObject {
             { key: "ArrowLeft", isPressed: false, isClockwise: !isTopHalf },
             { key: "ArrowRight", isPressed: false, isClockwise: isTopHalf },
         ]
+        this.boardPaddleSpeed = protectedWallWidth * paddleSpeedFactor;
+        this.paddleHeight = height;
+        this.paddleWidth = width;
+        this.paddleAngle = paddleDirection.angle();
+        this.playerId = playerId;
     }
 
     private getCenter(): Vec2 {
@@ -616,12 +658,16 @@ class PongPaddle extends MultiObject {
         return sum.div(count);
     }
 
+    public setReverseControls(reverse: boolean): void {
+        this.reverseControls = reverse;
+    }
+
     /// Update the paddle velocity based on the current key states and the given paddle speed. Return the amount of time this move will maximally take before hitting the bounds.
-    public updatePaddleVelocity(paddleSpeed: number): number {
+    public updatePaddleVelocity(): number {
         let moveDirection = 0;
         for (const keyData of this.keyData) {
             if (keyData.isPressed) {
-                moveDirection += keyData.isClockwise ? 1 : -1;
+                moveDirection += (keyData.isClockwise !== this.reverseControls) ? 1 : -1;
             }
         }
 
@@ -630,9 +676,8 @@ class PongPaddle extends MultiObject {
             return Infinity;
         }
 
-        const desiredVelocity = this.clockwiseBaseVelocity.normalize().mul(moveDirection * paddleSpeed);
+        const desiredVelocity = this.clockwiseBaseVelocity.normalize().mul(moveDirection * this.boardPaddleSpeed);
         const maxTravelDistance = moveDirection > 0 ? this.bounds.max.sub(this.getCenter()).len() : this.getCenter().sub(this.bounds.min).len();
-        console.log("Paddle max travel distance:", maxTravelDistance);
 
         if (maxTravelDistance < 1) {
             this.velocity = new Vec2(0, 0);
@@ -642,6 +687,29 @@ class PongPaddle extends MultiObject {
         const maxTravelTime = maxTravelDistance / desiredVelocity.len();
         this.velocity = desiredVelocity;
         return maxTravelTime;
+    }
+
+    public getSpeed(): number {
+        return this.boardPaddleSpeed;
+    }
+
+    public setSpeed(newSpeed: number): void {
+        this.boardPaddleSpeed = newSpeed;
+    }
+
+    public toJSON(): any {
+        const center = this.getCenter();
+        const velocity = this.velocity;
+        return [
+            center.x,
+            center.y,
+            this.paddleAngle,
+            this.paddleWidth,
+            this.paddleHeight,
+            velocity.x,
+            velocity.y,
+            this.playerId,
+        ]
     }
 }
 
@@ -657,15 +725,120 @@ class PongBall extends CircleObject {
             return CollisionResponse.BOUNCE;
         });
     }
+
+    public toJSON(): any {
+        return [
+            this.center.x,
+            this.center.y,
+            this.velocity.x,
+            this.velocity.y,
+            this.radius,
+            this.inverseMass,
+        ]
+    }
 }
 
 class Powerup extends CircleObject {
-    constructor(center: Vec2, radius: number, velocity: Vec2) {
+    private activationStartTime: number | null = null;
+    private metadata: PowerupData;
+    private spawnTime: number;
+    private game: PongGame;
+
+    constructor(center: Vec2, radius: number, velocity: Vec2, powerup: PowerupData, game: PongGame) {
         super(center, radius, velocity, 0.5, 1.0);
+        this.metadata = powerup;
+        this.game = game;
+        this.spawnTime = game.getScene().getElapsedTime();
 
         this.setCollisionHandler((other: BaseObject) => {
+            if (other instanceof PongBall) {
+                console.log(`Powerup of type ${PowerupType[this.metadata.type]} collected by ball ID ${other.id}.`);
+                this.game.applyPowerupEffect(this, other);
+            }
+
             return CollisionResponse.RESET;
         });
+    }
+
+    static generateRandomPowerup(center: Vec2, velocity: Vec2, game: PongGame): Powerup {
+        let randomPowerupIndex = Math.random() * totalPowerupChance;
+        let newPowerup: PowerupData | undefined = undefined;
+        for (const powerup of powerupData) {
+            if (randomPowerupIndex < powerup.chance) {
+                newPowerup = powerup;
+                break;
+            }
+            randomPowerupIndex -= powerup.chance;
+        }
+
+        if (newPowerup === undefined) {
+            newPowerup = powerupData[0]!;
+        }
+
+        return new Powerup(center, 10, velocity, newPowerup, game);
+    }
+
+    public getPowerupType(): PowerupType {
+        return this.metadata.type;
+    }
+
+    public activate(currentTime: number): void {
+        this.activationStartTime = currentTime;
+    }
+
+    public isPowerupActive(currentTime: number): boolean {
+        if (this.activationStartTime === null || this.metadata.duration === null) return false;
+        return (currentTime - this.activationStartTime + EPS) < this.metadata.duration;
+    }
+
+    public isPowerupTaken(): boolean {
+        return this.activationStartTime !== null;
+    }
+
+    public isTimeBased(): boolean {
+        return this.metadata.duration !== null;
+    }
+
+    public getRemainingPowerupTime(currentTime: number): number {
+        if (this.activationStartTime === null) return 0;
+        if (this.metadata.duration === null) return Infinity;
+        const elapsed = currentTime - this.activationStartTime;
+        return Math.max(0, this.metadata.duration - elapsed);
+    }
+
+    public toJSON(): any {
+        return [
+            this.center.x,
+            this.center.y,
+            this.velocity.x,
+            this.velocity.y,
+            this.radius,
+            this.spawnTime,
+            this.metadata.type,
+            this.metadata.duration,
+            this.activationStartTime,
+        ]
+    }
+}
+
+class Wall extends LineObject {
+    public playerId: number;
+
+    constructor(pointA: Vec2, pointB: Vec2, playerId: number) {
+        super(pointA, pointB, new Vec2(0, 0), 0, 1.0);
+        this.playerId = playerId;
+    }
+
+    public toJSON(): any {
+        return [
+            this.pointA.x,
+            this.pointA.y,
+            this.pointB.x,
+            this.pointB.y,
+            this.velocity.x,
+            this.velocity.y,
+            this.playerId,
+        ]
     }
 }
 
@@ -673,7 +846,7 @@ type PongGameOptions = {
     canvasWidth: number;
     canvasHeight: number;
     ballSpeed: number;
-    paddleSpeed: number;
+    paddleSpeedFactor: number;
     paddleSize?: number;
     paddleWallOffset?: number;
     amountOfBalls?: number;
@@ -681,12 +854,15 @@ type PongGameOptions = {
 }
 
 class PongGame {
-    private walls: LineObject[] = [];
+    private walls: Wall[] = [];
     private balls: PongBall[] = [];
     private powerups: Powerup[] = [];
     private paddles: PongPaddle[] = [];
     private scene: Scene = new Scene();
     private score: Map<number, number> = new Map();
+
+    private gameOptions: PongGameOptions;
+    private nextPowerupSpawnTime: number = 0;
 
     private constructPlayingField(players: number[], gameOptions: PongGameOptions): void {
         const size = Math.min(gameOptions.canvasWidth, gameOptions.canvasHeight);
@@ -700,16 +876,16 @@ class PongGame {
         for (let i = 0; i < players.length; i++) {
             const wallStart = center.add(new Vec2(0, -1).rotate(i * angleStep - halfAngleStep).mul(halfSize));
             const wallEnd = center.add(new Vec2(0, -1).rotate(i * angleStep + halfAngleStep).mul(halfSize));
-            const wall = new LineObject(wallStart, wallEnd, new Vec2(0, 0), 0, 1.0);
+            const wall = new Wall(wallStart, wallEnd, players[i]!);
 
-            wall.onCollision = (other: BaseObject): CollisionResponse => {
+            wall.setCollisionHandler((other: BaseObject): CollisionResponse => {
                 console.log(`Ball collided with player ${players[i]}'s wall.`);
                 if (other instanceof PongBall) {
                     this.score.set(players[i]!, (this.score.get(players[i]!) || 0) - 1);
                     console.log(`Player ${players[i]} conceded a point! Current score: ${this.score.get(players[i]!)}.`);
                 }
                 return CollisionResponse.BOUNCE;
-            }
+            });
 
             this.walls.push(wall);
             this.scene.addObject(wall);
@@ -726,10 +902,39 @@ class PongGame {
             const playerPaddleSize = (gameOptions.paddleSize || 0.3) * (wallEnd.sub(wallStart).len());
             const playerPaddleOffset = gameOptions.paddleWallOffset || 50;
             const paddleCenter = center.add(new Vec2(0, -1).rotate(i * angleStep).mul(closestDistanceWallToCenter - playerPaddleOffset));
-            const paddle = new PongPaddle(paddleCenter, playerPaddleSize, 20, new Vec2(0, -1).rotate(i * angleStep).normalize(), wallEnd.sub(wallStart).len(), [this.walls[(i-1 + this.walls.length) % this.walls.length]!, this.walls[(i+1) % this.walls.length]!]);
+            const paddle = new PongPaddle(paddleCenter, playerPaddleSize, 20, new Vec2(0, -1).rotate(i * angleStep).normalize(), wallEnd.sub(wallStart).len(), gameOptions.paddleSpeedFactor, [this.walls[(i-1 + this.walls.length) % this.walls.length]!, this.walls[(i+1) % this.walls.length]!], players[i]!);
             this.paddles.push(paddle);
             this.scene.addObject(paddle);
         }
+    }
+
+    private spawnNewBall(position: Vec2, velocity: Vec2, radius: number, inverseMass: number, gameOptions: PongGameOptions): void {
+        const ball = new PongBall(position, radius, velocity);
+        ball.setCollisionHandler((other: BaseObject, elapsedTime: number): CollisionResponse => {
+            if (other instanceof LineObject) {
+                const wall = this.walls.find(w => w === other);
+                if (wall) {
+                    ball.center = new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2);
+                    ball.velocity = new Vec2(0, -1).rotate(Math.random() * 2 * Math.PI).mul(gameOptions.ballSpeed);
+                    return CollisionResponse.IGNORE;
+                }
+            }
+            return CollisionResponse.BOUNCE;
+        });
+
+        ball.inverseMass = inverseMass;
+        this.balls.push(ball);
+        this.scene.addObject(ball);
+    }
+
+    private spawnNewPowerup(): void {
+        const gameOptions = this.gameOptions;
+        const position = new Vec2(Math.random() * gameOptions.canvasWidth * 0.8 + gameOptions.canvasWidth * 0.1, Math.random() * gameOptions.canvasHeight * 0.8 + gameOptions.canvasHeight * 0.1);
+        const velocity = new Vec2(0, 0);
+        const powerup = Powerup.generateRandomPowerup(position, velocity, this);
+        this.powerups.push(powerup);
+        this.scene.addObject(powerup);
+        console.log(`Spawned new powerup of type ${PowerupType[powerup.getPowerupType()]} at position (${position.x.toFixed(2)}, ${position.y.toFixed(2)}).`);
     }
 
     constructor(players: number[], gameOptions: PongGameOptions) {
@@ -739,24 +944,16 @@ class PongGame {
         this.powerups = [];
 
         this.constructPlayingField(players, gameOptions);
+        this.gameOptions = gameOptions;
 
         for (let i = 0; i < (gameOptions.amountOfBalls || 1); i++) {
             const ballDirection = new Vec2(0, -1).rotate(i * (2 * Math.PI) / (gameOptions.amountOfBalls || 1));
-            const ball = new PongBall(new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2), 10, ballDirection.mul(gameOptions.ballSpeed));
-            ball.onCollision = (other: BaseObject): CollisionResponse => {
-                if (other instanceof LineObject) {
-                    const wall = this.walls.find(w => w === other);
-                    if (wall) {
-                        console.log(`Ball collided with wall.`);
-                        ball.center = new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2);
-                        ball.velocity = new Vec2(0, -1).rotate(Math.random() * 2 * Math.PI).mul(gameOptions.ballSpeed);
-                        return CollisionResponse.IGNORE;
-                    }
-                }
-                return CollisionResponse.BOUNCE;
-            }
-            this.balls.push(ball);
-            this.scene.addObject(ball);
+            this.spawnNewBall(new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2), ballDirection.mul(gameOptions.ballSpeed), 10, 1.0, gameOptions);
+        }
+
+        for (let i = 0; i < players.length; i++) {
+            this.score.set(players[i]!, 0);
+            this.spawnNewPowerup();
         }
     }
 
@@ -766,11 +963,17 @@ class PongGame {
 
     public playSimulation(deltaTime: number): void {
         let timeRemaining = deltaTime;
+        this.cleanUpExpiredPowerups();
+
+        if (this.scene.getElapsedTime() >= this.nextPowerupSpawnTime) {
+            this.spawnNewPowerup();
+            this.nextPowerupSpawnTime += this.gameOptions.powerupFrequency * (0.8 + Math.random() * 0.4);
+        }
 
         while (timeRemaining > EPS) {
             let minPaddleTime = Infinity;
             for (const paddle of this.paddles) {
-                const paddleTime = paddle.updatePaddleVelocity(400);
+                const paddleTime = paddle.updatePaddleVelocity();
                 if (paddleTime < minPaddleTime) {
                     minPaddleTime = paddleTime;
                 }
@@ -782,12 +985,112 @@ class PongGame {
         }
     }
 
+    public applyPowerupEffect(powerup: Powerup, ball: PongBall): void {
+        switch (powerup.getPowerupType()) {
+            case PowerupType.ADD_BALL:
+                this.spawnNewBall(ball.center.clone(), ball.velocity.clone().rotate(Math.random() * Math.PI / 4 - Math.PI / 8), ball.radius, 1.0, this.gameOptions);
+                break;
+
+            case PowerupType.INCREASE_PADDLE_SPEED:
+                this.paddles.forEach(paddle => paddle.setSpeed(paddle.getSpeed() * 2));
+                break;
+
+            case PowerupType.DECREASE_PADDLE_SPEED:
+                this.paddles.forEach(paddle => paddle.setSpeed(paddle.getSpeed() * 0.5));
+                break;
+
+            case PowerupType.SLOW_MOTION:
+                this.scene.setTimeScale(0.5);
+                break;
+
+            case PowerupType.REVERSE_CONTROLS:
+                this.paddles.forEach(paddle => paddle.setReverseControls(true));
+                break;
+        }
+
+        powerup.activate(this.scene.getElapsedTime());
+    }
+
+    public removePowerupEffects(powerup: Powerup): void {
+        switch (powerup.getPowerupType()) {
+            case PowerupType.INCREASE_PADDLE_SPEED:
+                this.paddles.forEach(paddle => paddle.setSpeed(paddle.getSpeed() / 2));
+                break;
+            
+            case PowerupType.DECREASE_PADDLE_SPEED:
+                this.paddles.forEach(paddle => paddle.setSpeed(paddle.getSpeed() * 2));
+                break;
+
+            case PowerupType.SLOW_MOTION:
+                this.scene.setTimeScale(1.0);
+                break;
+
+            case PowerupType.REVERSE_CONTROLS:
+                this.paddles.forEach(paddle => paddle.setReverseControls(false));
+                break;
+            
+            default:
+                if (powerup.isTimeBased()) {
+                    console.warn(`Powerup of type ${PowerupType[powerup.getPowerupType()]} has no removal effect defined.`);
+                }
+                break;
+        }
+    }
+
+    private cleanUpExpiredPowerups(): void {
+        const currentTime = this.scene.getElapsedTime();
+        this.powerups = this.powerups.filter(powerup => {
+            const couldBeRemoved = !(powerup.isPowerupActive(currentTime) || !powerup.isPowerupTaken());
+            if (couldBeRemoved) {
+                console.log(`Removing expired powerup of type ${PowerupType[powerup.getPowerupType()]}.`);
+                this.scene.getObjects().splice(this.scene.getObjects().indexOf(powerup), 1);
+                this.removePowerupEffects(powerup);
+            }
+            return !couldBeRemoved;
+        });
+    }
+
     public handleKeyPress(key: string, isPressed: boolean): void {
         for (const paddle of this.paddles) {
             for (const keyData of paddle.keyData) {
                 if (keyData.key !== key) continue;
                 keyData.isPressed = isPressed;
             }
+        }
+    }
+
+    public fetchPlayerScoreMap(): Map<number, number> {
+        const allPlayers: Set<number> = new Set();
+        for (const paddle of this.paddles)
+            allPlayers.add(paddle.playerId);
+
+        const scoreMap: Map<number, number> = new Map();
+
+        for (const basePlayerId of allPlayers) {
+            const playerNegativeScore = this.score.get(basePlayerId) || 0;
+            if (playerNegativeScore >= 0) continue;
+
+            for (const playerId of allPlayers) {
+                if (playerId === basePlayerId) continue;
+                scoreMap.set(playerId, (scoreMap.get(playerId) || 0) + Math.abs(playerNegativeScore));
+            }
+        }
+
+        return scoreMap;
+    }
+
+    public fetchBoardJSON(): any {
+        return {
+            metadata: {
+                gameOptions: this.gameOptions,
+                elapsedTime: this.scene.getElapsedTime(),
+                players: this.paddles.map(paddle => paddle.playerId),
+            },
+            walls: this.walls.map(wall => wall.toJSON()),
+            balls: this.balls.map(ball => ball.toJSON()),
+            paddles: this.paddles.map(paddle => paddle.toJSON()),
+            powerups: this.powerups.map(powerup => powerup.toJSON()),
+            score: Object.fromEntries(this.fetchPlayerScoreMap()),
         }
     }
 }

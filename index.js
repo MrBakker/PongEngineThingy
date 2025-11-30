@@ -134,7 +134,7 @@ var BaseObject = /** @class */ (function () {
         if (restitution === void 0) { restitution = 1.0; }
         if (parentObject === void 0) { parentObject = null; }
         this.parentObject = null;
-        this.collisionHandler = function (other) { return CollisionResponse.BOUNCE; };
+        this.collisionHandler = function (other, elapsedTime) { return CollisionResponse.BOUNCE; };
         this._velocity = velocity;
         this._inverseMass = inverseMass;
         this._restitution = restitution;
@@ -191,8 +191,8 @@ var BaseObject = /** @class */ (function () {
     BaseObject.prototype.setCollisionHandler = function (handler) {
         this.collisionHandler = handler;
     };
-    BaseObject.prototype.onCollision = function (other) {
-        return this.collisionHandler(other);
+    BaseObject.prototype.onCollision = function (other, elapsedTime) {
+        return this.collisionHandler(other, elapsedTime);
     };
     BaseObject.prototype.moveByDelta = function (delta) {
         throw new Error("moveByDelta not implemented");
@@ -440,8 +440,12 @@ function resolveCircleLineCollision(ball, wall) {
 var Scene = /** @class */ (function () {
     function Scene() {
         this.elapsedTime = 0;
+        this.timeScale = 1.0;
         this.objects = [];
     }
+    Scene.prototype.setTimeScale = function (scale) {
+        this.timeScale = scale;
+    };
     Scene.prototype.addObject = function (obj) {
         this.objects.push(obj);
     };
@@ -493,7 +497,7 @@ var Scene = /** @class */ (function () {
             }
             finally { if (e_7) throw e_7.error; }
         }
-        this.elapsedTime += deltaTime;
+        this.elapsedTime += (deltaTime / this.timeScale);
     };
     Scene.prototype.getNextCollisionBetweenObjects = function (mainObjects) {
         var e_8, _a, e_9, _b, e_10, _c;
@@ -584,8 +588,7 @@ var Scene = /** @class */ (function () {
         return null;
     };
     Scene.prototype.playSimulation = function (deltaTime, mainObjects) {
-        console.log("Starting simulation step with deltaTime =", deltaTime);
-        var timeRemaining = deltaTime;
+        var timeRemaining = deltaTime * this.timeScale;
         var shouldContinue = true;
         var timeout = 1000;
         var _loop_1 = function () {
@@ -599,8 +602,8 @@ var Scene = /** @class */ (function () {
             timeRemaining -= earliestHit;
             var parentA = this_1.fetchParentObject(collision.objectA) || collision.objectA;
             var parentB = this_1.fetchParentObject(collision.objectB) || collision.objectB;
-            var aTask = parentA.onCollision(parentB);
-            var bTask = parentB.onCollision(parentA);
+            var aTask = parentA.onCollision(parentB, this_1.elapsedTime);
+            var bTask = parentB.onCollision(parentA, this_1.elapsedTime);
             var handleMethod = Math.max(aTask, bTask);
             switch (handleMethod) {
                 case CollisionResponse.IGNORE:
@@ -638,11 +641,30 @@ var Scene = /** @class */ (function () {
                 break;
         }
     };
+    Scene.prototype.getElapsedTime = function () {
+        return this.elapsedTime;
+    };
     return Scene;
 }());
+var PowerupType;
+(function (PowerupType) {
+    PowerupType[PowerupType["ADD_BALL"] = 0] = "ADD_BALL";
+    PowerupType[PowerupType["INCREASE_PADDLE_SPEED"] = 1] = "INCREASE_PADDLE_SPEED";
+    PowerupType[PowerupType["DECREASE_PADDLE_SPEED"] = 2] = "DECREASE_PADDLE_SPEED";
+    PowerupType[PowerupType["SLOW_MOTION"] = 3] = "SLOW_MOTION";
+    PowerupType[PowerupType["REVERSE_CONTROLS"] = 4] = "REVERSE_CONTROLS";
+})(PowerupType || (PowerupType = {}));
+var powerupData = [
+    { type: PowerupType.ADD_BALL, chance: 30, duration: null },
+    { type: PowerupType.INCREASE_PADDLE_SPEED, chance: 20, duration: 10 },
+    { type: PowerupType.DECREASE_PADDLE_SPEED, chance: 20, duration: 10 },
+    { type: PowerupType.SLOW_MOTION, chance: 20, duration: 10 },
+    { type: PowerupType.REVERSE_CONTROLS, chance: 10, duration: 10 },
+];
+var totalPowerupChance = powerupData.reduce(function (sum, p) { return sum + p.chance; }, 0);
 var PongPaddle = /** @class */ (function (_super) {
     __extends(PongPaddle, _super);
-    function PongPaddle(center, width, height, paddleDirection, protectedWallWidth, walls) {
+    function PongPaddle(center, width, height, paddleDirection, protectedWallWidth, paddleSpeedFactor, walls, playerId) {
         if (walls === void 0) { walls = []; }
         var _this = this;
         var halfWidth = width / 2;
@@ -656,7 +678,7 @@ var PongPaddle = /** @class */ (function (_super) {
         var bottomLeftCorner = new CircleObject(center.add(paddleDirection.normalize().perp().mul(halfWidth)).add(paddleDirection.normalize().mul(-halfHeight)), 0, new Vec2(0, 0), 0, 1.0);
         var bottomRightCorner = new CircleObject(center.add(paddleDirection.normalize().perp().mul(halfWidth)).add(paddleDirection.normalize().mul(halfHeight)), 0, new Vec2(0, 0), 0, 1.0);
         _this = _super.call(this, [topLine, bottomLine, leftLine, rightLine, topLeftCorner, topRightCorner, bottomLeftCorner, bottomRightCorner], new Vec2(0, 0), 0, 1.0) || this;
-        _this.playerId = -1;
+        _this.reverseControls = false;
         _this.clockwiseBaseVelocity = paddleDirection.clone().perp().normalize();
         _this.keyData = [];
         _this.playerId = -1;
@@ -670,6 +692,11 @@ var PongPaddle = /** @class */ (function (_super) {
             { key: "ArrowLeft", isPressed: false, isClockwise: !isTopHalf },
             { key: "ArrowRight", isPressed: false, isClockwise: isTopHalf },
         ];
+        _this.boardPaddleSpeed = protectedWallWidth * paddleSpeedFactor;
+        _this.paddleHeight = height;
+        _this.paddleWidth = width;
+        _this.paddleAngle = paddleDirection.angle();
+        _this.playerId = playerId;
         return _this;
     }
     PongPaddle.prototype.getCenter = function () {
@@ -698,15 +725,18 @@ var PongPaddle = /** @class */ (function (_super) {
         }
         return sum.div(count);
     };
+    PongPaddle.prototype.setReverseControls = function (reverse) {
+        this.reverseControls = reverse;
+    };
     /// Update the paddle velocity based on the current key states and the given paddle speed. Return the amount of time this move will maximally take before hitting the bounds.
-    PongPaddle.prototype.updatePaddleVelocity = function (paddleSpeed) {
+    PongPaddle.prototype.updatePaddleVelocity = function () {
         var e_13, _a;
         var moveDirection = 0;
         try {
             for (var _b = __values(this.keyData), _c = _b.next(); !_c.done; _c = _b.next()) {
                 var keyData = _c.value;
                 if (keyData.isPressed) {
-                    moveDirection += keyData.isClockwise ? 1 : -1;
+                    moveDirection += (keyData.isClockwise !== this.reverseControls) ? 1 : -1;
                 }
             }
         }
@@ -721,9 +751,8 @@ var PongPaddle = /** @class */ (function (_super) {
             this.velocity = new Vec2(0, 0);
             return Infinity;
         }
-        var desiredVelocity = this.clockwiseBaseVelocity.normalize().mul(moveDirection * paddleSpeed);
+        var desiredVelocity = this.clockwiseBaseVelocity.normalize().mul(moveDirection * this.boardPaddleSpeed);
         var maxTravelDistance = moveDirection > 0 ? this.bounds.max.sub(this.getCenter()).len() : this.getCenter().sub(this.bounds.min).len();
-        console.log("Paddle max travel distance:", maxTravelDistance);
         if (maxTravelDistance < 1) {
             this.velocity = new Vec2(0, 0);
             return Infinity;
@@ -731,6 +760,26 @@ var PongPaddle = /** @class */ (function (_super) {
         var maxTravelTime = maxTravelDistance / desiredVelocity.len();
         this.velocity = desiredVelocity;
         return maxTravelTime;
+    };
+    PongPaddle.prototype.getSpeed = function () {
+        return this.boardPaddleSpeed;
+    };
+    PongPaddle.prototype.setSpeed = function (newSpeed) {
+        this.boardPaddleSpeed = newSpeed;
+    };
+    PongPaddle.prototype.toJSON = function () {
+        var center = this.getCenter();
+        var velocity = this.velocity;
+        return [
+            center.x,
+            center.y,
+            this.paddleAngle,
+            this.paddleWidth,
+            this.paddleHeight,
+            velocity.x,
+            velocity.y,
+            this.playerId,
+        ];
     };
     return PongPaddle;
 }(MultiObject));
@@ -744,55 +793,144 @@ var PongBall = /** @class */ (function (_super) {
         });
         return _this;
     }
+    PongBall.prototype.toJSON = function () {
+        return [
+            this.center.x,
+            this.center.y,
+            this.velocity.x,
+            this.velocity.y,
+            this.radius,
+            this.inverseMass,
+        ];
+    };
     PongBall.idCounter = 0;
     return PongBall;
 }(CircleObject));
 var Powerup = /** @class */ (function (_super) {
     __extends(Powerup, _super);
-    function Powerup(center, radius, velocity) {
+    function Powerup(center, radius, velocity, powerup, game) {
         var _this = _super.call(this, center, radius, velocity, 0.5, 1.0) || this;
+        _this.activationStartTime = null;
+        _this.metadata = powerup;
+        _this.game = game;
+        _this.spawnTime = game.getScene().getElapsedTime();
         _this.setCollisionHandler(function (other) {
+            if (other instanceof PongBall) {
+                console.log("Powerup of type ".concat(PowerupType[_this.metadata.type], " collected by ball ID ").concat(other.id, "."));
+                _this.game.applyPowerupEffect(_this, other);
+            }
             return CollisionResponse.RESET;
         });
         return _this;
     }
+    Powerup.generateRandomPowerup = function (center, velocity, game) {
+        var e_14, _a;
+        var randomPowerupIndex = Math.random() * totalPowerupChance;
+        var newPowerup = undefined;
+        try {
+            for (var powerupData_1 = __values(powerupData), powerupData_1_1 = powerupData_1.next(); !powerupData_1_1.done; powerupData_1_1 = powerupData_1.next()) {
+                var powerup = powerupData_1_1.value;
+                if (randomPowerupIndex < powerup.chance) {
+                    newPowerup = powerup;
+                    break;
+                }
+                randomPowerupIndex -= powerup.chance;
+            }
+        }
+        catch (e_14_1) { e_14 = { error: e_14_1 }; }
+        finally {
+            try {
+                if (powerupData_1_1 && !powerupData_1_1.done && (_a = powerupData_1.return)) _a.call(powerupData_1);
+            }
+            finally { if (e_14) throw e_14.error; }
+        }
+        if (newPowerup === undefined) {
+            newPowerup = powerupData[0];
+        }
+        return new Powerup(center, 10, velocity, newPowerup, game);
+    };
+    Powerup.prototype.getPowerupType = function () {
+        return this.metadata.type;
+    };
+    Powerup.prototype.activate = function (currentTime) {
+        this.activationStartTime = currentTime;
+    };
+    Powerup.prototype.isPowerupActive = function (currentTime) {
+        if (this.activationStartTime === null || this.metadata.duration === null)
+            return false;
+        return (currentTime - this.activationStartTime + EPS) < this.metadata.duration;
+    };
+    Powerup.prototype.isPowerupTaken = function () {
+        return this.activationStartTime !== null;
+    };
+    Powerup.prototype.isTimeBased = function () {
+        return this.metadata.duration !== null;
+    };
+    Powerup.prototype.getRemainingPowerupTime = function (currentTime) {
+        if (this.activationStartTime === null)
+            return 0;
+        if (this.metadata.duration === null)
+            return Infinity;
+        var elapsed = currentTime - this.activationStartTime;
+        return Math.max(0, this.metadata.duration - elapsed);
+    };
+    Powerup.prototype.toJSON = function () {
+        return [
+            this.center.x,
+            this.center.y,
+            this.velocity.x,
+            this.velocity.y,
+            this.radius,
+            this.spawnTime,
+            this.metadata.type,
+            this.metadata.duration,
+            this.activationStartTime,
+        ];
+    };
     return Powerup;
 }(CircleObject));
+var Wall = /** @class */ (function (_super) {
+    __extends(Wall, _super);
+    function Wall(pointA, pointB, playerId) {
+        var _this = _super.call(this, pointA, pointB, new Vec2(0, 0), 0, 1.0) || this;
+        _this.playerId = playerId;
+        return _this;
+    }
+    Wall.prototype.toJSON = function () {
+        return [
+            this.pointA.x,
+            this.pointA.y,
+            this.pointB.x,
+            this.pointB.y,
+            this.velocity.x,
+            this.velocity.y,
+            this.playerId,
+        ];
+    };
+    return Wall;
+}(LineObject));
 var PongGame = /** @class */ (function () {
     function PongGame(players, gameOptions) {
-        var _this = this;
         this.walls = [];
         this.balls = [];
         this.powerups = [];
         this.paddles = [];
         this.scene = new Scene();
         this.score = new Map();
+        this.nextPowerupSpawnTime = 0;
         this.walls = [];
         this.balls = [];
         this.paddles = [];
         this.powerups = [];
         this.constructPlayingField(players, gameOptions);
-        var _loop_2 = function (i) {
-            var ballDirection = new Vec2(0, -1).rotate(i * (2 * Math.PI) / (gameOptions.amountOfBalls || 1));
-            var ball = new PongBall(new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2), 10, ballDirection.mul(gameOptions.ballSpeed));
-            ball.onCollision = function (other) {
-                if (other instanceof LineObject) {
-                    var wall = _this.walls.find(function (w) { return w === other; });
-                    if (wall) {
-                        console.log("Ball collided with wall.");
-                        ball.center = new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2);
-                        ball.velocity = new Vec2(0, -1).rotate(Math.random() * 2 * Math.PI).mul(gameOptions.ballSpeed);
-                        return CollisionResponse.IGNORE;
-                    }
-                }
-                return CollisionResponse.BOUNCE;
-            };
-            this_2.balls.push(ball);
-            this_2.scene.addObject(ball);
-        };
-        var this_2 = this;
+        this.gameOptions = gameOptions;
         for (var i = 0; i < (gameOptions.amountOfBalls || 1); i++) {
-            _loop_2(i);
+            var ballDirection = new Vec2(0, -1).rotate(i * (2 * Math.PI) / (gameOptions.amountOfBalls || 1));
+            this.spawnNewBall(new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2), ballDirection.mul(gameOptions.ballSpeed), 10, 1.0, gameOptions);
+        }
+        for (var i = 0; i < players.length; i++) {
+            this.score.set(players[i], 0);
+            this.spawnNewPowerup();
         }
     }
     PongGame.prototype.constructPlayingField = function (players, gameOptions) {
@@ -803,24 +941,24 @@ var PongGame = /** @class */ (function () {
         var amountOfWalls = Math.max(3, players.length);
         var halfAngleStep = Math.PI / amountOfWalls;
         var angleStep = (2 * Math.PI) / amountOfWalls;
-        var _loop_3 = function (i) {
+        var _loop_2 = function (i) {
             var wallStart = center.add(new Vec2(0, -1).rotate(i * angleStep - halfAngleStep).mul(halfSize));
             var wallEnd = center.add(new Vec2(0, -1).rotate(i * angleStep + halfAngleStep).mul(halfSize));
-            var wall = new LineObject(wallStart, wallEnd, new Vec2(0, 0), 0, 1.0);
-            wall.onCollision = function (other) {
+            var wall = new Wall(wallStart, wallEnd, players[i]);
+            wall.setCollisionHandler(function (other) {
                 console.log("Ball collided with player ".concat(players[i], "'s wall."));
                 if (other instanceof PongBall) {
                     _this.score.set(players[i], (_this.score.get(players[i]) || 0) - 1);
                     console.log("Player ".concat(players[i], " conceded a point! Current score: ").concat(_this.score.get(players[i]), "."));
                 }
                 return CollisionResponse.BOUNCE;
-            };
-            this_3.walls.push(wall);
-            this_3.scene.addObject(wall);
+            });
+            this_2.walls.push(wall);
+            this_2.scene.addObject(wall);
         };
-        var this_3 = this;
+        var this_2 = this;
         for (var i = 0; i < players.length; i++) {
-            _loop_3(i);
+            _loop_2(i);
         }
         for (var i = 0; i < players.length; i++) {
             var wallStart = center.add(new Vec2(0, -1).rotate(i * angleStep - halfAngleStep).mul(halfSize));
@@ -832,69 +970,218 @@ var PongGame = /** @class */ (function () {
             var playerPaddleSize = (gameOptions.paddleSize || 0.3) * (wallEnd.sub(wallStart).len());
             var playerPaddleOffset = gameOptions.paddleWallOffset || 50;
             var paddleCenter = center.add(new Vec2(0, -1).rotate(i * angleStep).mul(closestDistanceWallToCenter - playerPaddleOffset));
-            var paddle = new PongPaddle(paddleCenter, playerPaddleSize, 20, new Vec2(0, -1).rotate(i * angleStep).normalize(), wallEnd.sub(wallStart).len(), [this.walls[(i - 1 + this.walls.length) % this.walls.length], this.walls[(i + 1) % this.walls.length]]);
+            var paddle = new PongPaddle(paddleCenter, playerPaddleSize, 20, new Vec2(0, -1).rotate(i * angleStep).normalize(), wallEnd.sub(wallStart).len(), gameOptions.paddleSpeedFactor, [this.walls[(i - 1 + this.walls.length) % this.walls.length], this.walls[(i + 1) % this.walls.length]], players[i]);
             this.paddles.push(paddle);
             this.scene.addObject(paddle);
         }
+    };
+    PongGame.prototype.spawnNewBall = function (position, velocity, radius, inverseMass, gameOptions) {
+        var _this = this;
+        var ball = new PongBall(position, radius, velocity);
+        ball.setCollisionHandler(function (other, elapsedTime) {
+            if (other instanceof LineObject) {
+                var wall = _this.walls.find(function (w) { return w === other; });
+                if (wall) {
+                    ball.center = new Vec2(gameOptions.canvasWidth / 2, gameOptions.canvasHeight / 2);
+                    ball.velocity = new Vec2(0, -1).rotate(Math.random() * 2 * Math.PI).mul(gameOptions.ballSpeed);
+                    return CollisionResponse.IGNORE;
+                }
+            }
+            return CollisionResponse.BOUNCE;
+        });
+        ball.inverseMass = inverseMass;
+        this.balls.push(ball);
+        this.scene.addObject(ball);
+    };
+    PongGame.prototype.spawnNewPowerup = function () {
+        var gameOptions = this.gameOptions;
+        var position = new Vec2(Math.random() * gameOptions.canvasWidth * 0.8 + gameOptions.canvasWidth * 0.1, Math.random() * gameOptions.canvasHeight * 0.8 + gameOptions.canvasHeight * 0.1);
+        var velocity = new Vec2(0, 0);
+        var powerup = Powerup.generateRandomPowerup(position, velocity, this);
+        this.powerups.push(powerup);
+        this.scene.addObject(powerup);
+        console.log("Spawned new powerup of type ".concat(PowerupType[powerup.getPowerupType()], " at position (").concat(position.x.toFixed(2), ", ").concat(position.y.toFixed(2), ")."));
     };
     PongGame.prototype.getScene = function () {
         return this.scene;
     };
     PongGame.prototype.playSimulation = function (deltaTime) {
-        var e_14, _a;
+        var e_15, _a;
         var timeRemaining = deltaTime;
+        this.cleanUpExpiredPowerups();
+        if (this.scene.getElapsedTime() >= this.nextPowerupSpawnTime) {
+            this.spawnNewPowerup();
+            this.nextPowerupSpawnTime += this.gameOptions.powerupFrequency * (0.8 + Math.random() * 0.4);
+        }
         while (timeRemaining > EPS) {
             var minPaddleTime = Infinity;
             try {
-                for (var _b = (e_14 = void 0, __values(this.paddles)), _c = _b.next(); !_c.done; _c = _b.next()) {
+                for (var _b = (e_15 = void 0, __values(this.paddles)), _c = _b.next(); !_c.done; _c = _b.next()) {
                     var paddle = _c.value;
-                    var paddleTime = paddle.updatePaddleVelocity(400);
+                    var paddleTime = paddle.updatePaddleVelocity();
                     if (paddleTime < minPaddleTime) {
                         minPaddleTime = paddleTime;
                     }
                 }
             }
-            catch (e_14_1) { e_14 = { error: e_14_1 }; }
+            catch (e_15_1) { e_15 = { error: e_15_1 }; }
             finally {
                 try {
                     if (_c && !_c.done && (_a = _b.return)) _a.call(_b);
                 }
-                finally { if (e_14) throw e_14.error; }
+                finally { if (e_15) throw e_15.error; }
             }
             var stepTime = Math.min(timeRemaining, minPaddleTime);
             this.scene.playSimulation(stepTime, this.balls);
             timeRemaining -= stepTime;
         }
     };
+    PongGame.prototype.applyPowerupEffect = function (powerup, ball) {
+        switch (powerup.getPowerupType()) {
+            case PowerupType.ADD_BALL:
+                this.spawnNewBall(ball.center.clone(), ball.velocity.clone().rotate(Math.random() * Math.PI / 4 - Math.PI / 8), ball.radius, 1.0, this.gameOptions);
+                break;
+            case PowerupType.INCREASE_PADDLE_SPEED:
+                this.paddles.forEach(function (paddle) { return paddle.setSpeed(paddle.getSpeed() * 2); });
+                break;
+            case PowerupType.DECREASE_PADDLE_SPEED:
+                this.paddles.forEach(function (paddle) { return paddle.setSpeed(paddle.getSpeed() * 0.5); });
+                break;
+            case PowerupType.SLOW_MOTION:
+                this.scene.setTimeScale(0.5);
+                break;
+            case PowerupType.REVERSE_CONTROLS:
+                this.paddles.forEach(function (paddle) { return paddle.setReverseControls(true); });
+                break;
+        }
+        powerup.activate(this.scene.getElapsedTime());
+    };
+    PongGame.prototype.removePowerupEffects = function (powerup) {
+        switch (powerup.getPowerupType()) {
+            case PowerupType.INCREASE_PADDLE_SPEED:
+                this.paddles.forEach(function (paddle) { return paddle.setSpeed(paddle.getSpeed() / 2); });
+                break;
+            case PowerupType.DECREASE_PADDLE_SPEED:
+                this.paddles.forEach(function (paddle) { return paddle.setSpeed(paddle.getSpeed() * 2); });
+                break;
+            case PowerupType.SLOW_MOTION:
+                this.scene.setTimeScale(1.0);
+                break;
+            case PowerupType.REVERSE_CONTROLS:
+                this.paddles.forEach(function (paddle) { return paddle.setReverseControls(false); });
+                break;
+            default:
+                if (powerup.isTimeBased()) {
+                    console.warn("Powerup of type ".concat(PowerupType[powerup.getPowerupType()], " has no removal effect defined."));
+                }
+                break;
+        }
+    };
+    PongGame.prototype.cleanUpExpiredPowerups = function () {
+        var _this = this;
+        var currentTime = this.scene.getElapsedTime();
+        this.powerups = this.powerups.filter(function (powerup) {
+            var couldBeRemoved = !(powerup.isPowerupActive(currentTime) || !powerup.isPowerupTaken());
+            if (couldBeRemoved) {
+                console.log("Removing expired powerup of type ".concat(PowerupType[powerup.getPowerupType()], "."));
+                _this.scene.getObjects().splice(_this.scene.getObjects().indexOf(powerup), 1);
+                _this.removePowerupEffects(powerup);
+            }
+            return !couldBeRemoved;
+        });
+    };
     PongGame.prototype.handleKeyPress = function (key, isPressed) {
-        var e_15, _a, e_16, _b;
+        var e_16, _a, e_17, _b;
         try {
             for (var _c = __values(this.paddles), _d = _c.next(); !_d.done; _d = _c.next()) {
                 var paddle = _d.value;
                 try {
-                    for (var _e = (e_16 = void 0, __values(paddle.keyData)), _f = _e.next(); !_f.done; _f = _e.next()) {
+                    for (var _e = (e_17 = void 0, __values(paddle.keyData)), _f = _e.next(); !_f.done; _f = _e.next()) {
                         var keyData = _f.value;
                         if (keyData.key !== key)
                             continue;
                         keyData.isPressed = isPressed;
                     }
                 }
-                catch (e_16_1) { e_16 = { error: e_16_1 }; }
+                catch (e_17_1) { e_17 = { error: e_17_1 }; }
                 finally {
                     try {
                         if (_f && !_f.done && (_b = _e.return)) _b.call(_e);
                     }
-                    finally { if (e_16) throw e_16.error; }
+                    finally { if (e_17) throw e_17.error; }
                 }
             }
         }
-        catch (e_15_1) { e_15 = { error: e_15_1 }; }
+        catch (e_16_1) { e_16 = { error: e_16_1 }; }
         finally {
             try {
                 if (_d && !_d.done && (_a = _c.return)) _a.call(_c);
             }
-            finally { if (e_15) throw e_15.error; }
+            finally { if (e_16) throw e_16.error; }
         }
+    };
+    PongGame.prototype.fetchPlayerScoreMap = function () {
+        var e_18, _a, e_19, _b, e_20, _c;
+        var allPlayers = new Set();
+        try {
+            for (var _d = __values(this.paddles), _e = _d.next(); !_e.done; _e = _d.next()) {
+                var paddle = _e.value;
+                allPlayers.add(paddle.playerId);
+            }
+        }
+        catch (e_18_1) { e_18 = { error: e_18_1 }; }
+        finally {
+            try {
+                if (_e && !_e.done && (_a = _d.return)) _a.call(_d);
+            }
+            finally { if (e_18) throw e_18.error; }
+        }
+        var scoreMap = new Map();
+        try {
+            for (var allPlayers_1 = __values(allPlayers), allPlayers_1_1 = allPlayers_1.next(); !allPlayers_1_1.done; allPlayers_1_1 = allPlayers_1.next()) {
+                var basePlayerId = allPlayers_1_1.value;
+                var playerNegativeScore = this.score.get(basePlayerId) || 0;
+                if (playerNegativeScore >= 0)
+                    continue;
+                try {
+                    for (var allPlayers_2 = (e_20 = void 0, __values(allPlayers)), allPlayers_2_1 = allPlayers_2.next(); !allPlayers_2_1.done; allPlayers_2_1 = allPlayers_2.next()) {
+                        var playerId = allPlayers_2_1.value;
+                        if (playerId === basePlayerId)
+                            continue;
+                        scoreMap.set(playerId, (scoreMap.get(playerId) || 0) + Math.abs(playerNegativeScore));
+                    }
+                }
+                catch (e_20_1) { e_20 = { error: e_20_1 }; }
+                finally {
+                    try {
+                        if (allPlayers_2_1 && !allPlayers_2_1.done && (_c = allPlayers_2.return)) _c.call(allPlayers_2);
+                    }
+                    finally { if (e_20) throw e_20.error; }
+                }
+            }
+        }
+        catch (e_19_1) { e_19 = { error: e_19_1 }; }
+        finally {
+            try {
+                if (allPlayers_1_1 && !allPlayers_1_1.done && (_b = allPlayers_1.return)) _b.call(allPlayers_1);
+            }
+            finally { if (e_19) throw e_19.error; }
+        }
+        return scoreMap;
+    };
+    PongGame.prototype.fetchBoardJSON = function () {
+        return {
+            metadata: {
+                gameOptions: this.gameOptions,
+                elapsedTime: this.scene.getElapsedTime(),
+                players: this.paddles.map(function (paddle) { return paddle.playerId; }),
+            },
+            walls: this.walls.map(function (wall) { return wall.toJSON(); }),
+            balls: this.balls.map(function (ball) { return ball.toJSON(); }),
+            paddles: this.paddles.map(function (paddle) { return paddle.toJSON(); }),
+            powerups: this.powerups.map(function (powerup) { return powerup.toJSON(); }),
+            score: Object.fromEntries(this.fetchPlayerScoreMap()),
+        };
     };
     return PongGame;
 }());
