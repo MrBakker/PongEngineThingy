@@ -2,13 +2,16 @@
   // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
     // File Layout
-    // "rootDir": "./src",
-    // "outDir": "./dist",
+  // Put compiled .js files in `dist/` so sources are kept separate from emitted files.
+  "rootDir": ".",
+  "outDir": "./dist",
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
-    "module": "nodenext",
-    "target": "esnext",
+  // Emit ES modules suitable for browsers
+  "module": "esnext",
+  "moduleResolution": "node",
+  "target": "esnext",
     // "types": [],
     // For nodejs:
     // "lib": ["esnext"],

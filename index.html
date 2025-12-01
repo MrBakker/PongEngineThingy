@@ -6,26 +6,30 @@
     <meta http-equiv='X-UA-Compatible' content='IE=edge'>
     <title>Pong test</title>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <script src='index.js'></script>
 </head>
 
 <body>
     <button id="startButton">Start</button>
     <button id="stopButton">Stop</button>
     <canvas id="gameCanvas" width="1000" height="1000" style="width: 1000px; height: 1000px;"></canvas>
-    <script>
+    <script type="module">
+        import { PongGame } from './dist/pong/game.js';
+        import { LineObject, CircleObject } from './dist/engine/baseObjects.js';
+
         const canvas = document.getElementById("gameCanvas");
-        const pongGame = new PongGame([1, 2, 3, 4], {
+        const pongGame = new PongGame([1, 2], {
             canvasWidth: 1000,
             canvasHeight: 1000,
-            ballSpeed: 400,
-            paddleSpeedFactor: 0.5,
-            paddleSize: 0.3,
+            ballSpeed: 450,
+            paddleSpeedFactor: 1.6,
+            paddleWidthFactor: 0.1,
+            paddleHeight: 16,
             powerupFrequency: 3,
-            amountOfBalls: 4,
+            amountOfBalls: 3,
         });
         let animationFrameId = null;
         let speed = 1;
+        let removeEnabled = false;
 
         function resizeCanvas() {
             const size = Math.min(window.innerWidth, window.innerHeight);
@@ -123,9 +127,16 @@
                 console.log(JSON.stringify(pongGame.fetchBoardJSON()));
             }
 
+            if (event.key === "r") {
+                removeEnabled = !removeEnabled;
+            }
+
             let num = parseInt(event.key);
             if (!isNaN(num)) {
                 speed = num;
+
+                if (removeEnabled)
+                    pongGame.removePlayer(num);
             }
         });
 
